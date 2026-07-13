@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head><title>SecureDock</title></head>
+<body>
+  <h1>SecureDock Platform</h1>
+  <p>Status: <span style="color:green;">Running</span></p>
+  <p>Environment: <span id="env">loading...</span></p>
+  <script>
+    fetch('/api/v1/info')
+      .then(r => r.json())
+      .then(d => document.getElementById('env').textContent = d.env);
+  </script>
+</body>
+</html>
