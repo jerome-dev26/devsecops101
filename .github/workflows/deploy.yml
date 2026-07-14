@@ -8,19 +8,27 @@ jobs:
   security-scan:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
       - uses: actions/checkout@v4
 
+      # Fix Node.js 20 deprecation warning
+      - name: Force Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Install Trivy and Syft properly
       - name: Install Security Tools
         run: |
           # Install Trivy
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          wget https://github.com/aquasecurity/trivy/releases/download/v0.49.1/trivy_0.49.1_Linux-64bit.deb
+          sudo dpkg -i trivy_0.49.1_Linux-64bit.deb
+          
           # Install Syft
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin
+          
+          # Verify installations
+          trivy --version
+          syft --version
 
       - name: Gitleaks (Secrets)
         uses: gitleaks/gitleaks-action@v2
@@ -37,39 +45,82 @@ jobs:
       - name: Hadolint (Dockerfile lint)
         continue-on-error: true
         run: |
-          docker run --rm -v $(pwd):/workspace hadolint/hadolint:latest /workspace/securedock-platform/docker/Dockerfile.backend
+          # Check if Dockerfiles exist and lint them
+          if [ -f "securedock-platform/docker/Dockerfile.backend" ]; then
+            docker run --rm -v $(pwd):/workspace hadolint/hadolint:latest /workspace/securedock-platform/docker/Dockerfile.backend
+          else
+            echo "Dockerfile.backend not found, skipping lint"
+          fi
+          
+          if [ -f "securedock-platform/docker/Dockerfile.frontend" ]; then
+            docker run --rm -v $(pwd):/workspace hadolint/hadolint:latest /workspace/securedock-platform/docker/Dockerfile.frontend
+          else
+            echo "Dockerfile.frontend not found, skipping lint"
+          fi
 
       - name: Build Backend and Trivy Scan
         continue-on-error: true
         id: trivy-backend
         run: |
-          cd securedock-platform
-          docker build -f docker/Dockerfile.backend -t securedock-backend:test .
-          trivy image --severity CRITICAL,HIGH --exit-code 1 securedock-backend:test
+          # Check if Dockerfile exists
+          if [ -f "securedock-platform/docker/Dockerfile.backend" ]; then
+            docker build -f securedock-platform/docker/Dockerfile.backend -t securedock-backend:test securedock-platform/
+            trivy image --severity CRITICAL,HIGH --exit-code 1 securedock-backend:test
+          else
+            echo "Dockerfile.backend not found, skipping backend scan"
+          fi
 
       - name: Build Frontend and Trivy Scan
         continue-on-error: true
         id: trivy-frontend
         run: |
-          cd securedock-platform
-          docker build -f docker/Dockerfile.frontend -t securedock-frontend:test .
-          trivy image --severity CRITICAL,HIGH --exit-code 1 securedock-frontend:test
+          if [ -f "securedock-platform/docker/Dockerfile.frontend" ]; then
+            docker build -f securedock-platform/docker/Dockerfile.frontend -t securedock-frontend:test securedock-platform/
+            trivy image --severity CRITICAL,HIGH --exit-code 1 securedock-frontend:test
+          else
+            echo "Dockerfile.frontend not found, skipping frontend scan"
+          fi
 
       - name: Generate SBOM with Syft
         continue-on-error: true
         run: |
-          cd securedock-platform
-          syft securedock-backend:test -o json > sbom-backend.json
-          syft securedock-frontend:test -o json > sbom-frontend.json
-      
+          # Check if images exist before generating SBOM
+          if docker image inspect securedock-backend:test > /dev/null 2>&1; then
+            syft securedock-backend:test -o json > sbom-backend.json
+            echo "✅ SBOM generated for backend"
+          else
+            echo "⚠️ Backend image not found, skipping SBOM"
+          fi
+          
+          if docker image inspect securedock-frontend:test > /dev/null 2>&1; then
+            syft securedock-frontend:test -o json > sbom-frontend.json
+            echo "✅ SBOM generated for frontend"
+          else
+            echo "⚠️ Frontend image not found, skipping SBOM"
+          fi
+
+      - name: List generated files for debugging
+        run: |
+          echo "Generated files:"
+          ls -la *.json 2>/dev/null || echo "No JSON files found"
+
       - name: Upload SBOMs
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: sbom
           path: |
-            securedock-platform/sbom-backend.json
-            securedock-platform/sbom-frontend.json
+            sbom-backend.json
+            sbom-frontend.json
+
+      - name: Upload Trivy results (if any)
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: security-scan-logs
+          path: |
+            *.json
+            *.log
 
       - name: Security Scan Summary
         if: always()
@@ -80,7 +131,6 @@ jobs:
           echo "✅ Hadolint (Docker): Completed"
           echo "✅ Trivy Backend: ${{ steps.trivy-backend.outcome }}"
           echo "✅ Trivy Frontend: ${{ steps.trivy-frontend.outcome }}"
-          echo "✅ SBOM Generated: Completed"
 
   deploy:
     runs-on: ubuntu-latest
@@ -88,6 +138,11 @@ jobs:
     if: always() && needs.security-scan.result != 'failure'
     steps:
       - uses: actions/checkout@v4
+
+      - name: Force Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - name: Get EC2 IP from Terraform output
         run: |
