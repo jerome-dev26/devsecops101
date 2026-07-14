@@ -10,13 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Fix Node.js 20 deprecation warning
-      - name: Force Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      # Remove the setup-node step entirely to avoid forcing Node.js 20
 
-      # Install Trivy and Syft properly
       - name: Install Security Tools
         run: |
           # Install Trivy
@@ -32,7 +27,7 @@ jobs:
 
       - name: Gitleaks (Secrets)
         uses: gitleaks/gitleaks-action@v2
-        continue-on-error: true
+        continue-on-error: true # This must be explicitly set to true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -45,7 +40,6 @@ jobs:
       - name: Hadolint (Dockerfile lint)
         continue-on-error: true
         run: |
-          # Check if Dockerfiles exist and lint them
           if [ -f "securedock-platform/docker/Dockerfile.backend" ]; then
             docker run --rm -v $(pwd):/workspace hadolint/hadolint:latest /workspace/securedock-platform/docker/Dockerfile.backend
           else
@@ -62,7 +56,6 @@ jobs:
         continue-on-error: true
         id: trivy-backend
         run: |
-          # Check if Dockerfile exists
           if [ -f "securedock-platform/docker/Dockerfile.backend" ]; then
             docker build -f securedock-platform/docker/Dockerfile.backend -t securedock-backend:test securedock-platform/
             trivy image --severity CRITICAL,HIGH --exit-code 1 securedock-backend:test
@@ -84,7 +77,6 @@ jobs:
       - name: Generate SBOM with Syft
         continue-on-error: true
         run: |
-          # Check if images exist before generating SBOM
           if docker image inspect securedock-backend:test > /dev/null 2>&1; then
             syft securedock-backend:test -o json > sbom-backend.json
             echo "✅ SBOM generated for backend"
@@ -101,48 +93,36 @@ jobs:
 
       - name: List generated files for debugging
         run: |
-          echo "Generated files:"
-          ls -la *.json 2>/dev/null || echo "No JSON files found"
+          echo "Generated files in current directory:"
+          ls -la ./*.json 2>/dev/null || echo "No JSON files found"
 
       - name: Upload SBOMs
         uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && (success() || failure())
         with:
           name: sbom
           path: |
             sbom-backend.json
             sbom-frontend.json
-
-      - name: Upload Trivy results (if any)
-        uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: security-scan-logs
-          path: |
-            *.json
-            *.log
+          # This will not fail the step if the files are missing.
 
       - name: Security Scan Summary
         if: always()
         run: |
           echo "📊 Security Scan Results:"
-          echo "✅ Gitleaks (Secrets): Completed"
-          echo "✅ Semgrep (SAST): Completed"
-          echo "✅ Hadolint (Docker): Completed"
-          echo "✅ Trivy Backend: ${{ steps.trivy-backend.outcome }}"
-          echo "✅ Trivy Frontend: ${{ steps.trivy-frontend.outcome }}"
+          echo "Gitleaks (Secrets): Completed with ${{ job.status }}"
+          echo "Semgrep (SAST): Completed with ${{ job.status }}"
+          echo "Hadolint (Docker): Completed"
+          echo "Trivy Backend: ${{ steps.trivy-backend.outcome }}"
+          echo "Trivy Frontend: ${{ steps.trivy-frontend.outcome }}"
 
   deploy:
     runs-on: ubuntu-latest
     needs: security-scan
+    # Deploy only if the security-scan job didn't fail critically
     if: always() && needs.security-scan.result != 'failure'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Force Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
 
       - name: Get EC2 IP from Terraform output
         run: |
